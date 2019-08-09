@@ -195,7 +195,7 @@ objects:
             clientVersion="$(sed -n 's/^\([cC]lient.*:\|oc\) v\([0-9]\+\.[0-9]\+\).*/\2/p' \
                               <<<"$version" | head -n 1)"
             # translate k8s 1.13 to ocp 4.1
-            if [[ "${serverVersion:-}" =~ ^1\.([0-9]+)$ ]]; then
+            if [[ "${serverVersion:-}" =~ ^1\.([0-9]+)$ && "${BASH_REMATCH[1]}" -gt 12 ]]; then
               serverVersion="4.$((${BASH_REMATCH[1]} - 12))"
             fi
             if [[ -z "${clientVersion:-}" ]]; then
@@ -204,8 +204,6 @@ objects:
               printf 'WARNING: Client version != Server version (%s != %s).\n' "$clientVersion" "$serverVersion" >&2
               printf '         Please reinstantiate this template with the correct BASE_IMAGE_TAG parameter (e.g. v%s)."\n' >&2 \
                 "$serverVersion"
-            elif [[ "${serverVersion}" =~ ^3\. ]]; then
-              printf 'No need to patch vsystem pods on OpenShift ${serverVersion}. Exiting.\n'
             fi
 
             registry="${REGISTRY:-}"
@@ -245,11 +243,11 @@ objects:
               local matchPhase="${2:-}"
               local uuid="$(oc get -o go-template=$'{{index .metadata.labels "vsystem.datahub.sap.com/uuid"}}\n' "deploy/${deploymentName}")"
               local name
-              while IFS=: read -u 4 -r name phase;
+              while IFS=: read -r name phase;
               do
                 [[ "$phase" =~ $matchPhase ]] || continue
                 getPatchedNodeKeyValueForPod "$name"
-              done 4< <(oc get pods -l "vsystem.datahub.sap.com/uuid=$uuid" \
+              done < <(oc get pods -l "vsystem.datahub.sap.com/uuid=$uuid" \
                           -o go-template=$'{{range .items}}{{.metadata.name}}:{{.status.phase}}\n{{end}}')
             }
 
@@ -269,19 +267,23 @@ objects:
               done
             }
 
+            function evalBool() {
+              local varName="$1"
+              local default="${2:-}"
+              eval 'local value="${'"$varName"':-}"'
+              if [[ -z "${value:-}" ]]; then
+                value="${default:-}"
+              fi
+              grep -q -i '^\s*\(y\(es\)\?\|true\|1\)\s*$' <<<"${value:-}"
+            }
+
             function runOrLog() {
-              if grep -iq '^\(1\|true\|y\(es\)\?\)$' <<<"${DRY_RUN}"; then
+              if evalBool DRY_RUN; then
                 echo "$@"
               else
                 "$@"
               fi
             }
-
-            if printf '%s\n' "${DRY_RUN:-}" | grep -q -i '^\s*\(y\(es\)\?\|true\|1\)\s*$'; then
-              DRY_RUN=1
-            else
-              DRY_RUN=0
-            fi
 
             gotmplarr=(
               '{{range $di, $d := .items}}'
@@ -289,9 +291,9 @@ objects:
                   '{{with $appcomp := index .metadata.labels "datahub.sap.com/app-component"}}'
                     '{{if eq $appcomp "vsystem-app"}}'
                       # vsystem-app deployment
-                      '{{range $i, $c := .spec.template.spec.containers}}'
+                      '{{range $i, $c := $d.spec.template.spec.containers}}'
                         '{{if eq .name "vsystem-iptables"}}'
-                          # print (string kind)/(string sdh-app-component):(string "ready" or "unready"):(int containerIndex):(bool privileged)
+                          # print (string kind)/(string sdh-app-component):(string "ready" or "unready"):(int containerIndex):(bool unprivileged)
                           '{{$d.kind}}/{{$appcomp}}:'
                           '{{with $s := $d.status}}'
                             '{{with $s.replicas}}'
@@ -321,11 +323,12 @@ objects:
                           '{{with $path := $vol.hostPath.path}}'
                             '{{if eq $path "/var/run/docker.sock"}}'
                               '{{$vol.name}}:'
-                              $'{{with $t := $spec.securityContext.seLinuxOptions.type}}{{$t}}{{end}}\n'
+                              '{{with $t := $spec.securityContext.seLinuxOptions.type}}{{$t}}{{end}}'
                             '{{end}}'
                           '{{end}}'
                         '{{end}}'
                       '{{end}}'
+                     $'\n'
                     '{{end}}'
                   '{{end}}'
                 '{{else}}'
@@ -333,7 +336,7 @@ objects:
                   '{{if eq .metadata.name "vsystem-vrep"}}'
                     # print (string kind):(int containerIndex):(string volumeMountName)
                     '{{.kind}}'
-                    '{{range $i, $c := .spec.template.spec.containers}}'
+                    '{{range $i, $c := $d.spec.template.spec.containers}}'
                       '{{if eq $c.name "vsystem-vrep"}}'
                         ':{{$i}}'
                         '{{range $vmi, $vm := $c.volumeMounts}}'
@@ -343,7 +346,7 @@ objects:
                         '{{end}}'
                       '{{end}}'
                     '{{end}}'
-                    $'\n'
+                   $'\n'
                   '{{end}}'
                 '{{end}}'
               '{{end}}'
@@ -363,17 +366,23 @@ objects:
             if [[ -n "${SDH_NAMESPACE:-}" ]]; then
               printf 'Watching namespace "%s" for vsystem-apps deployments...\n' "$SDH_NAMESPACE"
             fi
-            while IFS=' ' read -u 3 -r _ _ _ _ _ name; do
+            gotmpl="$(printf '%s' "${gotmplarr[@]}")"
+            gotmplvflow=$'{{range $index, $arg := (index (index .spec.template.spec.containers 0) "args")}}{{$arg}}\n{{end}}'
+
+            set -x
+            while IFS=' ' read -u 4 -r _ _ _ _ _ name; do
               [[ -z "${name:-}" ]] && continue
-              ( oc get deploy/"$name" statefulset/"$name" \
-                    -o go-template="$(printf '%s' "${gotmplarr[@]}")" ||: ; ) | \
-                  while IFS=: read -r resource rest;
-                  #-o go-template="$(printf '%s' "${gotmplarr[@]}")" 2>/dev/null ||: ; ) | \
-              do
+              while IFS=: read -u 3 -r resource rest; do
+                #if [[ "${resource,,}" =~ deployment/vsystem-app|statefulset && "${serverVersion}" =~ ^3\. ]]; then
+                if [[ "${resource,,}" =~ statefulset && "${serverVersion}" =~ ^3\. ]]; then
+                  printf 'No need to patch vsystem pods on OpenShift %s, skipping ${resource,,}/%s...\n' "${serverVersion}" "$name" >&2
+                  continue
+                fi
+                printf 'resource: "%s", rest: "%s"\n' "$resource" "${rest:-}" >&2
                 case "${resource,,}" in
                 deployment/vsystem-app)
-                  IFS=: read -r index ready <<<"${rest:-}"
-                  if [[ "$ready" == "true" ]]; then
+                  IFS=: read -r ready index unprivileged <<<"${rest:-}"
+                  if [[ "$unprivileged" == "true" ]]; then
                     allPatched=1
                     if [[ ! -e /tmp/patched-nodes ]]; then
                       allPatched=0
@@ -399,20 +408,19 @@ objects:
                     }]'
                   else
                     printf 'Container #%d in deployment/%s already patched, skipping ...\n' "$index" "$name" >&2
-                    if [[ "${kind##*/}" == "ready" ]]; then
+                    if [[ "$ready" == "ready" ]]; then
                       getPatchedNodeKeyValuesForDeployment "$name" "^Running$" | updatePatchedNodes
                     fi
                   fi
                   ;;
 
                 deployment/vflow)
-                  if grep -iq '^\(1\|true\|y\(es\)\?\)$' <<<"${MARK_REGISTRY_INSECURE:-}" && \
-                        [[ -n "$(get_registry)" ]];
-                  then 
+                  patches=()
+                  if evalBool MARK_REGISTRY_INSECURE && [[ -n "$(get_registry)" ]]; then
+                    registry="$(get_registry)"
+                    readarray -t vflowargs <<<"$(oc get deploy -o go-template="${gotmplvflow}" "$name")"
                     if ! grep -q -F -- "-insecure-registry=${registry}" <<<"${vflowargs[@]}"; then
-                      readarray -t vflowargs <<<"$(oc get deploy \
-                                   -o go-template=$'{{range $index, $arg := (index (index .spec.template.spec.containers 0) "args")}}{{$arg}}\n{{end}}' "$name")"
-                      vflowargs+=( "-insecure-registry=$(get_registry)" )
+                      vflowargs+=( "-insecure-registry=${registry}" )
                       newargs=( )
                       for ((i=0; i<"${#vflowargs[@]}"; i++)) do
                         # escape double qoutes of each argument and surround it with double quotes
@@ -462,8 +470,9 @@ objects:
                   fi
                   ;;
                 esac
-              done
-            done 3< <(observe)
+              done 3< <(oc get deploy/"$name" statefulset/"$name" -o go-template="${gotmpl}" ||: )
+              #-o go-template="$(printf '%s' "${gotmplarr[@]}")" 2>/dev/null ||: ; ) | \
+            done 4< <(observe)
         restartPolicy: Always
         serviceAccount: sdh-observer
         serviceAccountName: sdh-observer
