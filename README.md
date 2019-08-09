@@ -74,21 +74,27 @@ Please refer to the [SAP Data Hub 2.X on OpenShift Container Platform knowledge 
 
 ### How it works
 
-Once deployed, the `vflow-observer` pod will modify all the existing pipeline modeler deployments and pods in the `SDH_NAMESPACE` project in a way that the vflow registry is marked as insecure. This will terminate existing pipeline modeler pods and spawn new ones. Once the modified pods are running, all the subsequents pushes to the insecure registry will succeed as long as there are no other issues.
+Once deployed, the `vflow-observer` pod will modify all the existing pipeline modeler deployments and pods in the `SDH_NAMESPACE` project in a way that the vflow registry is marked as insecure (as long as `MARK_REGISTRY_INSECURE` is set to `true`) and the container is run as `spc_t` type. This will terminate existing pipeline modeler pods and spawn new ones. Once the modified pods are running, the container will be able to access the docker socket on host (if mounted) and all the subsequents pushes to the insecure registry will succeed as long as there are no other issues.
 
 The `vflow-observer` will then continue to watch `SDH_NAMESPACE` project and will modify any newly created pipeline modeler deployments and pods in the same way.
 
 ### Usage
 
-The `insecure-registry-for-vflow-template.yaml` template can be deployed before, during or after SAP Data Hub's installation either in the same namespace/project or in a different one.
+The `vflow-observer.yaml` template can be deployed before, during or after SAP Data Hub's installation either in the same namespace/project or in a different one.
 
 #### Deploying in the Data Hub project
 
-If running the observer in the same namespace/project as Data Hub, instantiate the template as is in the desired namespace:
+If running the observer in the same namespace/project as Data Hub, instantiate the template as is in the desired namespace.
 
     oc project $SDH_NAMESPACE
     oc process -f https://raw.githubusercontent.com/miminar/sdh-helpers/master/vflow-observer.yaml \
        | oc create -f -
+
+If the `VFLOW_REGISTRY` shall be marked as insecure, add `MARK_REGISTRY_INSECURE=true` parameter like this:
+
+    oc project $SDH_NAMESPACE
+    oc process -f https://raw.githubusercontent.com/miminar/sdh-helpers/master/vflow-observer.yaml \
+       MARK_REGISTRY_INSECURE=true | oc create -f -
 
 #### Deploying in a different project
 
@@ -99,3 +105,5 @@ If running in a different/new namespace/project, instantiate the template with p
     oc new-project $NAMESPACE
     oc process -f https://raw.githubusercontent.com/miminar/sdh-helpers/master/vflow-observer.yaml \
         SDH_NAMESPACE=$SDH_NAMESPACE NAMESPACE=$NAMESPACE | oc create -f -
+
+Again, make sure to add `MARK_REGISTRY_INSECURE=true` parameter if the `VFLOW_REGISTRY` shall be marked as insecure.

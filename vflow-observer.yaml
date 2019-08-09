@@ -147,6 +147,10 @@ objects:
             value: ${REGISTRY}
           - name: SDH_NAMESPACE
             value: ${SDH_NAMESPACE}
+          - name: MARK_REGISTRY_INSECURE
+            value: ${MARK_REGISTRY_INSECURE}
+          - name: DRY_RUN
+            value: ${DRY_RUN}
           image: "${BASE_IMAGE}:${BASE_IMAGE_TAG}"
           name: vflow-observer
           command:
@@ -186,6 +190,13 @@ objects:
               fi
               printf '%s\n' "$registry"
             }
+            function runOrLog() {
+              if grep -iq '^\(1\|true\|y\(es\)\?\)$' <<<"${DRY_RUN:-}"; then
+                echo "$@"
+              else
+                "$@"
+              fi
+            }
             readonly gotmplarr=(
               '{{with $spec := .spec.template.spec}}'
                 '{{range $i, $vol := $spec.volumes}}'
@@ -206,7 +217,10 @@ objects:
 
               readarray -t vflowargs <<<"$(oc get deploy -o go-template=$'{{range $index, $arg := (index (index .spec.template.spec.containers 0) "args")}}{{$arg}}\n{{end}}' "$name")"
               registry="$(get_registry)"
-              if [[ -n "${registry:-}" ]] && ! grep -q -F -- "-insecure-registry=${registry}" <<<"${vflowargs[@]}"; then
+              if [[ -n "${registry:-}" && ]] && \
+                    grep -iq '^\(1\|true\|y\(es\)\?\)$' <<<"${MARK_REGISTRY_INSECURE:-}" && \
+                  ! grep -q -F -- "-insecure-registry=${registry}" <<<"${vflowargs[@]}";
+              then
                 vflowargs+=( "-insecure-registry=$(get_registry)" )
                 newargs=( )
                 for ((i=0; i<"${#vflowargs[@]}"; i++)) do
@@ -235,7 +249,7 @@ objects:
               fi
 
               [[ "${#patches[@]}" == 0 ]] && continue
-              oc patch --type json -p "[$(join , "${patches[@]}")]" deploy "$name"
+              runOrLog oc patch --type json -p "[$(join , "${patches[@]}")]" deploy "$name"
             done 3< <(oc observe deploy)
         restartPolicy: Always
         serviceAccount: vflow-observer
@@ -250,7 +264,8 @@ parameters:
       with the OpenShift cluster. It must contain at least oc and bash
       binaries.
   - description: >
-      The tag of BASE_IMAGE to pull. The tag shall correspond to the OpenShift release of the cluster.
+      The tag of BASE_IMAGE to pull. The tag shall correspond to the OpenShift
+      release of the cluster.
     name: BASE_IMAGE_TAG
     required: true
     value: "v3.11"
@@ -268,8 +283,20 @@ parameters:
     description: >
       The registry to mark as insecure. If not given, it will be determined from
       the installer-config secret in the SDH_NAMESPACE.
+  - name: MARK_REGISTRY_INSECURE
+    description: >
+      Set to true if the given or configured VFLOW_REGISTRY shall be marked as insecure
+      in all instances of Pipeline Modeler.
+    required: true
+    value: "false"
   - name: ROLE_BINDING_SUFFIX
     description: >
       A random suffix for the new RoleBinding's name. No need to edit.
     generate: expression
     from: '[a-z0-9]{5}'
+  - name: DRY_RUN
+    description: >
+      If set to true, no action will be performed. The pod will just print what would have been
+      executed.
+    required: false
+    value: "false"
