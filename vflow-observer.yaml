@@ -217,22 +217,23 @@ objects:
 
               readarray -t vflowargs <<<"$(oc get deploy -o go-template=$'{{range $index, $arg := (index (index .spec.template.spec.containers 0) "args")}}{{$arg}}\n{{end}}' "$name")"
               registry="$(get_registry)"
-              if [[ -n "${registry:-}" && ]] && \
-                    grep -iq '^\(1\|true\|y\(es\)\?\)$' <<<"${MARK_REGISTRY_INSECURE:-}" && \
-                  ! grep -q -F -- "-insecure-registry=${registry}" <<<"${vflowargs[@]}";
-              then
-                vflowargs+=( "-insecure-registry=$(get_registry)" )
-                newargs=( )
-                for ((i=0; i<"${#vflowargs[@]}"; i++)) do
-                  # escape double qoutes of each argument and surround it with double quotes
-                  newargs+=( '"'"$(sed 's/"/\\"/g' <<<"${vflowargs[$i]}")"'"' )
-                done
-                # turn the argument array into a json list of strings
-                newarglist="[$(join , "${newargs[@]}")]"
-                printf 'Patching deployment/%s to treat %s registry as insecure ...\n' "$name" "$registry" >&2
-                patches+=( '{"op":"add","path":"/spec/template/spec/containers/0/args","value":'"$newarglist"'}' )
-              elif [[ -n "${registry:-}" ]]; then
-                printf 'deployment/%s already patched to treat %s registry as insecure, not patching ...\n' "$name" "$registry" >&2
+              if [[ -n "${registry:-}" ]] && \
+                    grep -iq '^\(1\|true\|y\(es\)\?\)$' <<<"${MARK_REGISTRY_INSECURE:-}";
+              then 
+                if ! grep -q -F -- "-insecure-registry=${registry}" <<<"${vflowargs[@]}"; then
+                  vflowargs+=( "-insecure-registry=$(get_registry)" )
+                  newargs=( )
+                  for ((i=0; i<"${#vflowargs[@]}"; i++)) do
+                    # escape double qoutes of each argument and surround it with double quotes
+                    newargs+=( '"'"$(sed 's/"/\\"/g' <<<"${vflowargs[$i]}")"'"' )
+                  done
+                  # turn the argument array into a json list of strings
+                  newarglist="[$(join , "${newargs[@]}")]"
+                  printf 'Patching deployment/%s to treat %s registry as insecure ...\n' "$name" "$registry" >&2
+                  patches+=( '{"op":"add","path":"/spec/template/spec/containers/0/args","value":'"$newarglist"'}' )
+                else
+                  printf 'deployment/%s already patched to treat %s registry as insecure, not patching ...\n' "$name" "$registry" >&2
+                fi
               fi
 
               IFS=: read -r volName seType <<<"$(oc get deploy -o go-template="${gotmpl}" "$name")"
