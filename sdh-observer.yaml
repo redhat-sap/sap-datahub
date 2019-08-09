@@ -1,7 +1,7 @@
 apiVersion: template.openshift.io/v1
 kind: Template
 metadata:
-  name: vsystem-observer
+  name: sdh-observer
   annotations:
     openshift.io/display-name: "Permission granter for SAP Data Hub vsystem"
     description: >
@@ -28,14 +28,14 @@ metadata:
         as is in the desired namespace:
 
           oc project $SDH_NAMESPACE
-          oc process vsystem-observer NAMESPACE=$SDH_NAMESPACE | oc create -f -
+          oc process sdh-observer NAMESPACE=$SDH_NAMESPACE | oc create -f -
 
         If running in a different/new namespace/project, instantiate the
         template with parameters SDH_NAMESPACE and NAMESPACE, e.g.:
 
           oc new-project $SDH_NAMESPACE
           oc new-project sapdatahub-admin
-          oc process vsystem-observer \
+          oc process sdh-observer \
               SDH_NAMESPACE=$SDH_NAMESPACE \
               NAMESPACE=sapdatahub-admin | oc create -f -
 
@@ -45,28 +45,29 @@ message: >-
   The vsystem-app observer and patcher will be started. You can watch the progress
   with the following command:
 
-    oc logs -f dc/vsystem-observer
+    oc logs -f dc/sdh-observer
 objects:
 - apiVersion: v1
   kind: ServiceAccount
   metadata:
-    name: vsystem-observer
+    name: sdh-observer
     namespace: ${NAMESPACE}
     labels:
-      deploymentconfig: vsystem-observer
+      deploymentconfig: sdh-observer
 
 - apiVersion: rbac.authorization.k8s.io/v1
   kind: Role
   metadata:
-    name: vsystem-observer
+    name: sdh-observer
     namespace: ${SDH_NAMESPACE}
     labels:
-      deploymentconfig: vsystem-observer
+      deploymentconfig: sdh-observer
   rules:
   - apiGroups:
     - apps
     - extensions
     resources:
+    - daemonsets
     - deployments
     - deployments/scale
     - statefulsets
@@ -112,44 +113,44 @@ objects:
   kind: RoleBinding
   metadata:
     namespace: ${SDH_NAMESPACE}
-    name: vsystem-observer-${ROLE_BINDING_SUFFIX}
+    name: sdh-observer-${ROLE_BINDING_SUFFIX}
     labels:
-      deploymentconfig: vsystem-observer
+      deploymentconfig: sdh-observer
   roleRef:
     apiGroup: rbac.authorization.k8s.io
     kind: Role
-    name: vsystem-observer
+    name: sdh-observer
     namespace: ${SDH_NAMESPACE}
   subjects:
   - kind: ServiceAccount
-    name: vsystem-observer
+    name: sdh-observer
     namespace: ${NAMESPACE}
 
 - apiVersion: rbac.authorization.k8s.io/v1
   kind: ClusterRoleBinding
   metadata:
-    name: vsystem-observer-2-node-reader-${ROLE_BINDING_SUFFIX}
+    name: sdh-observer-2-node-reader-${ROLE_BINDING_SUFFIX}
     labels:
-      deploymentconfig: vsystem-observer
+      deploymentconfig: sdh-observer
   roleRef:
     apiGroup: rbac.authorization.k8s.io
     kind: ClusterRole
     name: system:node-reader
   subjects:
   - kind: ServiceAccount
-    name: vsystem-observer
+    name: sdh-observer
     namespace: ${NAMESPACE}
 
 - apiVersion: v1
   kind: DeploymentConfig
   metadata:
-    name: vsystem-observer
+    name: sdh-observer
     namespace: ${NAMESPACE}
     labels:
-      deploymentconfig: vsystem-observer
+      deploymentconfig: sdh-observer
   spec:
     selector:
-      deploymentconfig: vsystem-observer
+      deploymentconfig: sdh-observer
     replicas: 1
     strategy:
       type: Rolling
@@ -158,7 +159,7 @@ objects:
     template:
       metadata:
         labels:
-          deploymentconfig: vsystem-observer
+          deploymentconfig: sdh-observer
           target: "vsystem-app.datahub.sap.com"
       spec:
         containers:
@@ -167,8 +168,12 @@ objects:
             value: ${SDH_NAMESPACE}
           - name: DRY_RUN
             value: ${DRY_RUN}
+          - name: REGISTRY
+            value: ${REGISTRY}
+          - name: MARK_REGISTRY_INSECURE
+            value: ${MARK_REGISTRY_INSECURE}
           image: "${BASE_IMAGE}:${BASE_IMAGE_TAG}"
-          name: vsystem-observer
+          name: sdh-observer
           command:
           - /bin/bash
           args:
@@ -176,6 +181,7 @@ objects:
           - |
             set -euo pipefail
             IFS=$'\n\t'
+            function join() { local IFS="$1"; shift; echo "$*"; }
             if [[ -n "${SDH_NAMESPACE:-}" ]]; then
               export HOME="$(mktemp -d)"  # so that oc can create $HOME/.kube/ directory
               oc project "${SDH_NAMESPACE}"
@@ -201,11 +207,23 @@ objects:
             elif [[ "${serverVersion}" =~ ^3\. ]]; then
               printf 'No need to patch vsystem pods on OpenShift ${serverVersion}. Exiting.\n'
             fi
+
+            registry="${REGISTRY:-}"
+            function get_registry() {
+              if [[ -z "${registry:-}" ]]; then
+                registry="$(oc get secret -o go-template='{{index .data "installer-config.yaml"}}' installer-config | \
+                   base64 -d | sed -n 's/^\s*VFLOW_REGISTRY:\s*\(.\+\)/\1/p')"
+              fi
+              printf '%s\n' "$registry"
+            }
+
             function terminate() {
               # terminate all the process in the container once one observer dies
               kill -9 -- `ps -ahx | awk '{print $1}' | grep -v -F "$BASHPID" | tac`
             }
+
             function observe() {
+              #oc observe --listen-addr=:11253 daemonset &
               oc observe --listen-addr=:11252 statefulset &
               oc observe --listen-addr=:11251 deploy      &
               while true; do
@@ -215,11 +233,13 @@ objects:
                 fi
               done
             }
+
             function getPatchedNodeKeyValueForPod() {
               local podName="$1"
               local nodeName="$(oc get -o jsonpath=$'{.spec.nodeName}\n' "pod/${podName}")"
               oc get -o jsonpath="$nodeName:"$'{.status.nodeInfo.bootID}\n' "node/$nodeName"
             }
+
             function getPatchedNodeKeyValuesForDeployment() {
               local deploymentName="$1"
               local matchPhase="${2:-}"
@@ -232,6 +252,7 @@ objects:
               done 4< <(oc get pods -l "vsystem.datahub.sap.com/uuid=$uuid" \
                           -o go-template=$'{{range .items}}{{.metadata.name}}:{{.status.phase}}\n{{end}}')
             }
+
             function updatePatchedNodes() {
               local line
               local nodeName
@@ -247,11 +268,7 @@ objects:
                 printf '%s\n' "$line" >> /tmp/patched-nodes
               done
             }
-            if printf '%s\n' "${DRY_RUN:-}" | grep -q -i '^\s*\(y\(es\)\?\|true\|1\)\s*$'; then
-              DRY_RUN=1
-            else
-              DRY_RUN=0
-            fi
+
             function runOrLog() {
               if grep -iq '^\(1\|true\|y\(es\)\?\)$' <<<"${DRY_RUN}"; then
                 echo "$@"
@@ -259,38 +276,62 @@ objects:
                 "$@"
               fi
             }
+
+            if printf '%s\n' "${DRY_RUN:-}" | grep -q -i '^\s*\(y\(es\)\?\|true\|1\)\s*$'; then
+              DRY_RUN=1
+            else
+              DRY_RUN=0
+            fi
+
             gotmplarr=(
               '{{range $di, $d := .items}}'
                 '{{if eq .kind "Deployment"}}'
-                  # vsystem-app deployment
-                  '{{if eq (index .metadata.labels "datahub.sap.com/app-component") "vsystem-app"}}'
-                    '{{range $i, $c := .spec.template.spec.containers}}'
-                      '{{if eq .name "vsystem-iptables"}}'
-                        '{{$d.kind}}/'
-                        '{{with $s := $d.status}}'
-                          '{{with $s.replicas}}'
-                            '{{with $s.availableReplicas}}'
-                              '{{if and (eq $s.replicas .) (and (gt . 0.1) (eq . $s.readyReplicas))}}'
-                                'ready'
+                  '{{with $appcomp := index .metadata.labels "datahub.sap.com/app-component"}}'
+                    '{{if eq $appcomp "vsystem-app"}}'
+                      # vsystem-app deployment
+                      '{{range $i, $c := .spec.template.spec.containers}}'
+                        '{{if eq .name "vsystem-iptables"}}'
+                          # print (string kind)/(string sdh-app-component):(string "ready" or "unready"):(int containerIndex):(bool privileged)
+                          '{{$d.kind}}/{{$appcomp}}:'
+                          '{{with $s := $d.status}}'
+                            '{{with $s.replicas}}'
+                              '{{with $s.availableReplicas}}'
+                                '{{if and (eq $s.replicas .) (and (gt . 0.1) (eq . $s.readyReplicas))}}'
+                                  'ready'
+                                '{{else}}'
+                                  'unready'
+                                '{{end}}'
+                              # when .status.availableReplicas is undefined
                               '{{else}}'
                                 'unready'
                               '{{end}}'
-                            # when .status.availableReplicas is undefined
+                            # when .status.replicas is undefined
                             '{{else}}'
                               'unready'
                             '{{end}}'
-                          # when .status.replicas is undefined
-                          '{{else}}'
-                            'unready'
+                          '{{end}}'
+                         $':{{$i}}:{{not $c.securityContext.privileged}}\n'
+                        '{{end}}'
+                      '{{end}}'
+                    '{{else if eq $appcomp "vflow"}}'
+                      # print (string kind)/(string name):[(string docker-socket-volume-mount-name):(string seLinuxtype)]
+                      '{{$d.kind}}/{{$appcomp}}:'
+                      '{{with $spec := $d.spec.template.spec}}'
+                        '{{range $i, $vol := $spec.volumes}}'
+                          '{{with $path := $vol.hostPath.path}}'
+                            '{{if eq $path "/var/run/docker.sock"}}'
+                              '{{$vol.name}}:'
+                              $'{{with $t := $spec.securityContext.seLinuxOptions.type}}{{$t}}{{end}}\n'
+                            '{{end}}'
                           '{{end}}'
                         '{{end}}'
-                       $':{{$i}}:{{not $c.securityContext.privileged}}\n'
                       '{{end}}'
                     '{{end}}'
                   '{{end}}'
                 '{{else}}'
                   # vsystem-vrep statefulset
                   '{{if eq .metadata.name "vsystem-vrep"}}'
+                    # print (string kind):(int containerIndex):(string volumeMountName)
                     '{{.kind}}'
                     '{{range $i, $c := .spec.template.spec.containers}}'
                       '{{if eq $c.name "vsystem-vrep"}}'
@@ -314,7 +355,7 @@ objects:
             do
               if ! oc auth can-i "${perm%%/*}" "${perm##*/}" >/dev/null; then
                 printf 'Cannot "%s" "%s", please grant the needed permissions' >&2 "${perm%%/*}" "${perm##*/}"
-                printf ' to vsystem-observer service account!\n'
+                printf ' to sdh-observer service account!\n'
                 lackingPermissions=1
               fi
             done
@@ -325,12 +366,14 @@ objects:
             while IFS=' ' read -u 3 -r _ _ _ _ _ name; do
               [[ -z "${name:-}" ]] && continue
               ( oc get deploy/"$name" statefulset/"$name" \
-                    -o go-template="$(printf '%s' "${gotmplarr[@]}")" 2>/dev/null ||: ; ) | \
-                  while IFS=: read -r kind index rest;
+                    -o go-template="$(printf '%s' "${gotmplarr[@]}")" ||: ; ) | \
+                  while IFS=: read -r resource rest;
+                  #-o go-template="$(printf '%s' "${gotmplarr[@]}")" 2>/dev/null ||: ; ) | \
               do
-                case "${kind,,}" in
-                deployment/*)
-                  if [[ "$rest" == "true" ]]; then
+                case "${resource,,}" in
+                deployment/vsystem-app)
+                  IFS=: read -r index ready <<<"${rest:-}"
+                  if [[ "$ready" == "true" ]]; then
                     allPatched=1
                     if [[ ! -e /tmp/patched-nodes ]]; then
                       allPatched=0
@@ -361,8 +404,49 @@ objects:
                     fi
                   fi
                   ;;
+
+                deployment/vflow)
+                  if grep -iq '^\(1\|true\|y\(es\)\?\)$' <<<"${MARK_REGISTRY_INSECURE:-}" && \
+                        [[ -n "$(get_registry)" ]];
+                  then 
+                    if ! grep -q -F -- "-insecure-registry=${registry}" <<<"${vflowargs[@]}"; then
+                      readarray -t vflowargs <<<"$(oc get deploy \
+                                   -o go-template=$'{{range $index, $arg := (index (index .spec.template.spec.containers 0) "args")}}{{$arg}}\n{{end}}' "$name")"
+                      vflowargs+=( "-insecure-registry=$(get_registry)" )
+                      newargs=( )
+                      for ((i=0; i<"${#vflowargs[@]}"; i++)) do
+                        # escape double qoutes of each argument and surround it with double quotes
+                        newargs+=( '"'"$(sed 's/"/\\"/g' <<<"${vflowargs[$i]}")"'"' )
+                      done
+                      # turn the argument array into a json list of strings
+                      newarglist="[$(join , "${newargs[@]}")]"
+                      printf 'Patching deployment/%s to treat %s registry as insecure ...\n' "$name" "$registry" >&2
+                      patches+=( '{"op":"add","path":"/spec/template/spec/containers/0/args","value":'"$newarglist"'}' )
+                    else
+                      printf 'deployment/%s already patched to treat %s registry as insecure, not patching ...\n' "$name" "$registry" >&2
+                    fi
+                  fi
+
+                  IFS=: read -r volName seType <<<"${rest:-}"
+                  if [[ -n "${volName:-}" ]]; then
+                    if [[ "${seType:-}" != "spc_t" ]]; then
+                      printf 'Patching deployment/%s to run as spc_t SELinux type ...\n' "$name" >&2
+                      patches+=( "$(join , \
+                                  '{"op":"add"' \
+                                   '"path":"/spec/template/spec/securityContext"' \
+                                   '"value":{"seLinuxOptions":{"type":"spc_t"}}}' )" )
+                    else
+                      printf 'deployment/%s already patched to run as spc_t type, not patching ...\n' "$name" >&2
+                    fi
+                  fi
+
+                  [[ "${#patches[@]}" == 0 ]] && continue
+                  runOrLog oc patch --type json -p "[$(join , "${patches[@]}")]" deploy "$name"
+                  ;;
+
                 statefulset)
-                  if [[ -n "${index:-}" && -n "${rest:-}" ]]; then
+                  IFS=: read -r index ready <<<"${rest:-}"
+                  if [[ -n "${index:-}" && -n "${ready:-}" ]]; then
                     printf 'statefulset/vsystem-vrep already patched, skipping ...\n' >&2
                   else
                     printf 'Adding emptyDir volume to statefulset/vsystem-vrep ...\n' >&2
@@ -381,8 +465,8 @@ objects:
               done
             done 3< <(observe)
         restartPolicy: Always
-        serviceAccount: vsystem-observer
-        serviceAccountName: vsystem-observer
+        serviceAccount: sdh-observer
+        serviceAccountName: sdh-observer
 
 parameters:
   - name: BASE_IMAGE
@@ -419,3 +503,13 @@ parameters:
       A random suffix for the new RoleBinding's name. No need to edit.
     generate: expression
     from: '[a-z0-9]{5}'
+  - name: MARK_REGISTRY_INSECURE
+    description: >
+      Set to true if the given or configured VFLOW_REGISTRY shall be marked as insecure
+      in all instances of Pipeline Modeler.
+    required: true
+    value: "false"
+  - name: REGISTRY
+    description: >
+      The registry to mark as insecure. If not given, it will be determined from
+      the installer-config secret in the SDH_NAMESPACE.
