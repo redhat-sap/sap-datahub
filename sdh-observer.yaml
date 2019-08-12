@@ -369,7 +369,6 @@ objects:
             gotmpl="$(printf '%s' "${gotmplarr[@]}")"
             gotmplvflow=$'{{range $index, $arg := (index (index .spec.template.spec.containers 0) "args")}}{{$arg}}\n{{end}}'
 
-            set -x
             while IFS=' ' read -u 4 -r _ _ _ _ _ name; do
               [[ -z "${name:-}" ]] && continue
               while IFS=: read -u 3 -r resource rest; do
@@ -378,7 +377,6 @@ objects:
                   printf 'No need to patch vsystem pods on OpenShift %s, skipping ${resource,,}/%s...\n' "${serverVersion}" "$name" >&2
                   continue
                 fi
-                printf 'resource: "%s", rest: "%s"\n' "$resource" "${rest:-}" >&2
                 case "${resource,,}" in
                 deployment/vsystem-app)
                   IFS=: read -r ready index unprivileged <<<"${rest:-}"
@@ -470,8 +468,7 @@ objects:
                   fi
                   ;;
                 esac
-              done 3< <(oc get deploy/"$name" statefulset/"$name" -o go-template="${gotmpl}" ||: )
-              #-o go-template="$(printf '%s' "${gotmplarr[@]}")" 2>/dev/null ||: ; ) | \
+              done 3< <(oc get deploy/"$name" statefulset/"$name" -o go-template="${gotmpl}" 2>/dev/null ||: )
             done 4< <(observe)
         restartPolicy: Always
         serviceAccount: sdh-observer
