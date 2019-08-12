@@ -372,8 +372,7 @@ objects:
             while IFS=' ' read -u 4 -r _ _ _ _ _ name; do
               [[ -z "${name:-}" ]] && continue
               while IFS=: read -u 3 -r resource rest; do
-                #if [[ "${resource,,}" =~ deployment/vsystem-app|statefulset && "${serverVersion}" =~ ^3\. ]]; then
-                if [[ "${resource,,}" =~ statefulset && "${serverVersion}" =~ ^3\. ]]; then
+                if [[ "${resource,,}" =~ deployment/vsystem-app|statefulset && "${serverVersion}" =~ ^3\. ]]; then
                   printf 'No need to patch vsystem pods on OpenShift %s, skipping ${resource,,}/%s...\n' "${serverVersion}" "$name" >&2
                   continue
                 fi
