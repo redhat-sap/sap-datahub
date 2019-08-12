@@ -462,6 +462,7 @@ objects:
 
                 daemonset)
                   IFS=: read -r index unprivileged <<<"${rest:-}"
+                  name="diagnostics-fluentd"
                   if [[ "$unprivileged" == "true" ]]; then
                     printf 'Patching container #%d in daemonset/%s to make its pods privileged ...\n' \
                         "$index" "$name" >&2
