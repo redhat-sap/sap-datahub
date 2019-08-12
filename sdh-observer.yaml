@@ -221,12 +221,12 @@ objects:
             }
 
             function observe() {
-              #oc observe --listen-addr=:11253 daemonset &
+              oc observe --listen-addr=:11253 daemonset   &
               oc observe --listen-addr=:11252 statefulset &
               oc observe --listen-addr=:11251 deploy      &
               while true; do
                 sleep 0.1
-                if [[ "$(jobs -r | wc -l)" -lt 2 ]]; then
+                if [[ "$(jobs -r | wc -l)" -lt 3 ]]; then
                   terminate
                 fi
               done
@@ -331,6 +331,16 @@ objects:
                      $'\n'
                     '{{end}}'
                   '{{end}}'
+                '{{else if eq .kind "DaemonSet"}}'
+                  '{{if eq .metadata.name "diagnostics-fluentd"}}'
+                    '{{.kind}}'
+                    '{{range $i, $c := $d.spec.template.spec.containers}}'
+                      '{{if eq $c.name "diagnostics-fluentd"}}'
+                        $':{{$i}}:{{not $c.securityContext.privileged}}\n'
+                      '{{end}}'
+                    '{{end}}'
+                   $'\n'
+                  '{{end}}'
                 '{{else}}'
                   # vsystem-vrep statefulset
                   '{{if eq .metadata.name "vsystem-vrep"}}'
@@ -354,7 +364,7 @@ objects:
             lackingPermissions=0
             for perm in get/nodes get/projects get/pods get/secrets \
                       watch/deployments get/deployments watch/statefulsets get/statefulsets \
-                      patch/deployments patch/statefulsets;
+                      patch/deployments patch/statefulsets patch/daemonsets;
             do
               if ! oc auth can-i "${perm%%/*}" "${perm##*/}" >/dev/null; then
                 printf 'Cannot "%s" "%s", please grant the needed permissions' >&2 "${perm%%/*}" "${perm##*/}"
@@ -373,7 +383,8 @@ objects:
               [[ -z "${name:-}" ]] && continue
               while IFS=: read -u 3 -r resource rest; do
                 if [[ "${resource,,}" =~ deployment/vsystem-app|statefulset && "${serverVersion}" =~ ^3\. ]]; then
-                  printf 'No need to patch vsystem pods on OpenShift %s, skipping ${resource,,}/%s...\n' "${serverVersion}" "$name" >&2
+                  resource="${resource%%/*}"
+                  printf 'No need to patch vsystem pods on OpenShift %s, skipping %s/%s...\n' "${serverVersion}" "${resource,,}" "$name" >&2
                   continue
                 fi
                 case "${resource,,}" in
@@ -449,6 +460,21 @@ objects:
                   runOrLog oc patch --type json -p "[$(join , "${patches[@]}")]" deploy "$name"
                   ;;
 
+                daemonset)
+                  IFS=: read -r index unprivileged <<<"${rest:-}"
+                  if [[ "$unprivileged" == "true" ]]; then
+                    printf 'Patching container #%d in daemonset/%s to make its pods privileged ...\n' \
+                        "$index" "$name" >&2
+                    runOrLog oc patch "daemonset/$name" --type json -p '[{
+                      "op": "add",
+                      "path": "/spec/template/spec/containers/'"$index"'/securityContext/privileged",
+                      "value": true
+                    }]'
+                  else
+                    printf 'Container #%d in daemonset/%s already patched, skipping ...\n' "$index" "$name" >&2
+                  fi
+                  ;;
+
                 statefulset)
                   IFS=: read -r index ready <<<"${rest:-}"
                   if [[ -n "${index:-}" && -n "${ready:-}" ]]; then
@@ -467,7 +493,8 @@ objects:
                   fi
                   ;;
                 esac
-              done 3< <(oc get deploy/"$name" statefulset/"$name" -o go-template="${gotmpl}" 2>/dev/null ||: )
+              done 3< <(oc get deploy/"$name" statefulset/"$name" daemonset/"$name" \
+                           -o go-template="${gotmpl}" 2>/dev/null ||: )
             done 4< <(observe)
         restartPolicy: Always
         serviceAccount: sdh-observer
