@@ -62,7 +62,7 @@ The template must be instantiated before the SAP Data Hub's installation. Both t
 
 Targeted at:
 
-- OpenShift 3.11 or higher
+- OpenShift 3.10 or higher
 - SAP Data Hub is 2.5 or higher
 
 **NOTE**: you will likely see the very first deployment of license-management to fail during the SAP Data Hub's installation with a message like the following:
