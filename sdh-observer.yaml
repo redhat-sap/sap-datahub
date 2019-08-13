@@ -3,7 +3,7 @@ kind: Template
 metadata:
   name: sdh-observer
   annotations:
-    openshift.io/display-name: "Permission granter for SAP Data Hub vsystem"
+    openshift.io/display-name: "OpenShift enabler and observer for SAP Data Hub"
     description: >
       On Red Hat Enterprise Linux CoreOS, container needs to be run as privileged
       in order to manage iptables on the host system. SAP Data Hub containers named
@@ -18,6 +18,10 @@ metadata:
       Additionally vsystem-vrep statefulset will be patched to mount `emptyDir` volume
       at `/exports` directory in order to enable NFS exports in the container running
       on top overlayfs which is the default filesystem in RHCOS.
+
+      The observer also allows to patch `vflow` pods to mark registry as insecure.
+      Unless kaniko builds are enabled, it will also patch `vflow` pods to run as
+      Super Privileged Containers in order to access Docker sockets on nodes.
 
       The template must be instantiated before the installation of SAP Data Hub.
       Also the namespace, where SAP Data Hub will be installed, must exist before

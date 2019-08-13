@@ -31,11 +31,11 @@ The template spawns a pod that observes the particular namespace where SAP Data 
 
 This is applicable only to OpenShift cluster 4.1 and newer. The resources running on earlier releases will not be modified.
 
-#### SDH Pipeline Modeler run as `spc_t`
+#### Running SDH Pipeline Modeler as a Super Privileged Container
 
 The Pipeline Modeler needs to access `/var/run/docker.sock` socket on the nodes if run without kaniko image builder (enabled with `--enable-kaniko=yes` parameter passed to the SDH installer). The access is, however, blocked by the default SELinux policy. In order to allow Pipeline Modeler to access the socket, it must be run as Super Privileged Container - it must be run in`spc_t` domain.
 
-The `sdh-observer` will patch any `vflow` deployments that attempts to mount the `docker.sock` on the host.
+The `sdh-observer` will patch any `vflow` deployments that attempt to mount the `docker.sock` on the host.
 
 **NOTE**: The recommended and secure approach is to enable kaniko image builds instead. The kaniko feature is available starting from SDH release 2.5.
 
