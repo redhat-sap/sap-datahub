@@ -108,6 +108,28 @@ objects:
     - projects
     verbs:
     - get
+  # necessary to cleanup obsolete sdh helpers
+  - apiGroups:
+    - apps
+    - deploymentconfigs.apps.openshift.io
+    resources:
+    - deploymentconfigs
+    verbs:
+    - get
+    - list
+    - delete
+  - apiGroups:
+    - ""
+    - authorization.openshift.io
+    - rbac.authorization.k8s.io
+    resources:
+    - roles
+    - rolebindings
+    - serviceaccounts
+    verbs:
+    - get
+    - list
+    - delete
 
 - apiVersion: rbac.authorization.k8s.io/v1
   kind: RoleBinding
@@ -376,6 +398,13 @@ objects:
             if [[ -n "${SDH_NAMESPACE:-}" ]]; then
               printf 'Watching namespace "%s" for vsystem-apps deployments...\n' "$SDH_NAMESPACE"
             fi
+
+            # delete obsolete deploymentconfigs
+            ( oc get -o name {deploymentconfig,serviceaccount,role}/{vflow,vsystem}-observer 2>/dev/null;
+              oc get -o name rolebinding -l deploymentconfig=vflow-observer 2>/dev/null;
+              oc get -o name rolebinding -l deploymentconfig=vsystem-observer 2>/dev/null; ) | \
+                xargs -r oc delete || :
+
             gotmpl="$(printf '%s' "${gotmplarr[@]}")"
             gotmplvflow=$'{{range $index, $arg := (index (index .spec.template.spec.containers 0) "args")}}{{$arg}}\n{{end}}'
 
