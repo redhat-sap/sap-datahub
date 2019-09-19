@@ -210,7 +210,7 @@ objects:
             function join() { local IFS="$1"; shift; echo "$*"; }
             if [[ -n "${SDH_NAMESPACE:-}" ]]; then
               export HOME="$(mktemp -d)"  # so that oc can create $HOME/.kube/ directory
-              oc project "${SDH_NAMESPACE}"
+              oc project "$SDH_NAMESPACE"
             else
               SDH_NAMESPACE="$(oc project -q 2>/dev/null|| :)"
             fi
