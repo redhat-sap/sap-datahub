@@ -347,9 +347,11 @@ objects:
                         '{{end}}'
                       '{{end}}'
                     '{{else if eq $appcomp "vflow"}}'
-                      # print (string kind)/(string name):[(string docker-socket-volume-mount-name):(string seLinuxtype)]
+                      # print (string kind)/(string name):(string version):(bool unprivileged):[(string docker-socket-volume-mount-name):(string seLinuxtype)]
                       '{{$d.kind}}/{{$appcomp}}:'
+                      '{{index $d.metadata.labels "datahub.sap.com/package-version"}}:'
                       '{{with $spec := $d.spec.template.spec}}'
+                        '{{not (index $spec.containers 0).securityContext.privileged}}:'
                         '{{range $i, $vol := $spec.volumes}}'
                           '{{with $path := $vol.hostPath.path}}'
                             '{{if eq $path "/var/run/docker.sock"}}'
@@ -463,7 +465,14 @@ objects:
 
                 deployment/vflow)
                   patches=()
-                  if evalBool MARK_REGISTRY_INSECURE && [[ -n "$(get_registry)" ]]; then
+                  IFS=: read -r pkgversion unprivileged volName seType <<<"${rest:-}"
+                  pkgversion="${pkgversion#v}"
+                  pkgmajor="${pkgversion%%.*}"
+                  pkgminor="${pkgversion#*.}"
+                  pkgminor="${pkgminor%%.*}"
+
+                  # -insecure-registry flag is supported starting from 2.5; earlier releases need no patching
+                  if evalBool MARK_REGISTRY_INSECURE && [[ -n "$(get_registry)" ]] && [[ "${pkgmajor:-0}" == 2 && "${pkgminor:-0}" -ge 5 ]]; then
                     registry="$(get_registry)"
                     readarray -t vflowargs <<<"$(oc get deploy -o go-template="${gotmplvflow}" "$name")"
                     if ! grep -q -F -- "-insecure-registry=${registry}" <<<"${vflowargs[@]}"; then
@@ -482,16 +491,28 @@ objects:
                     fi
                   fi
 
-                  IFS=: read -r volName seType <<<"${rest:-}"
                   if [[ -n "${volName:-}" ]]; then
-                    if [[ "${seType:-}" != "spc_t" ]]; then
-                      printf 'Patching deployment/%s to run as spc_t SELinux type ...\n' "$name" >&2
-                      patches+=( "$(join , \
-                                  '{"op":"add"' \
-                                   '"path":"/spec/template/spec/securityContext"' \
-                                   '"value":{"seLinuxOptions":{"type":"spc_t"}}}' )" )
+                    if [[ "${pkgmajor:-0}" == 2 && "${pkgminor:-0}" -ge 5 ]]; then
+                      if [[ "${seType:-}" != "spc_t" ]]; then
+                        printf 'Patching deployment/%s to run as spc_t SELinux type ...\n' "$name" >&2
+                        patches+=( "$(join , \
+                                    '{"op":"add"' \
+                                     '"path":"/spec/template/spec/securityContext"' \
+                                     '"value":{"seLinuxOptions":{"type":"spc_t"}}}' )" )
+                      else
+                        printf 'deployment/%s already patched to run as spc_t type, not patching ...\n' "$name" >&2
+                      fi
                     else
-                      printf 'deployment/%s already patched to run as spc_t type, not patching ...\n' "$name" >&2
+                      # SDH 2.4 fails to run as spc_t on top of NFS - therefor privileged
+                      if [[ "${unprivileged:-true}" != "false" ]]; then
+                        printf 'Patching deployment/%s to run as privileged ...\n' "$name" >&2
+                        patches+=( "$(join , \
+                                    '{"op": "add"' \
+                                     '"path": "/spec/template/spec/containers/0/securityContext"' \
+                                     '"value": {"privileged": true}}' )" )
+                      else
+                        printf 'deployment/%s already patched to run as privileged type, not patching ...\n' "$name" >&2
+                      fi
                     fi
                   fi
 
