@@ -232,6 +232,20 @@ objects:
                 "$serverVersion"
             fi
 
+            function log() {
+              date -R | tr -d '\n' >&2
+              # no new line
+              if [[ "$1" == -n ]]; then
+                shift
+              elif [[ "${1: -1}" != $'\n' ]]; then
+                local fmt="${1:-}\n"
+                shift
+                printf "$fmt" "$@" >&2
+                return 0
+              fi
+              printf "$@" >&2
+            }
+
             registry="${REGISTRY:-}"
             function get_registry() {
               if [[ -z "${registry:-}" ]]; then
@@ -240,7 +254,7 @@ objects:
                     tr -d '"'"'" | grep -v '^[[:space:]]*$' | tail -n 1)"
               fi
               if [[ -z "${registry:-}" ]]; then
-                printf "Failed to determine the registry!\n" >&2
+                log "Failed to determine the registry!"
                 return 1
               fi
               printf '%s\n' "$registry"
@@ -401,14 +415,14 @@ objects:
                       patch/deployments patch/statefulsets patch/daemonsets;
             do
               if ! oc auth can-i "${perm%%/*}" "${perm##*/}" >/dev/null; then
-                printf 'Cannot "%s" "%s", please grant the needed permissions' >&2 "${perm%%/*}" "${perm##*/}"
-                printf ' to sdh-observer service account!\n'
+                log -n 'Cannot "%s" "%s", please grant the needed permissions' "${perm%%/*}" "${perm##*/}"
+                log ' to sdh-observer service account!'
                 lackingPermissions=1
               fi
             done
             [[ "${lackingPermissions:-0}" == 1 ]] && terminate
             if [[ -n "${SDH_NAMESPACE:-}" ]]; then
-              printf 'Watching namespace "%s" for vsystem-apps deployments...\n' "$SDH_NAMESPACE"
+              log 'Watching namespace "%s" for vsystem-apps deployments...' "$SDH_NAMESPACE"
             fi
 
             # delete obsolete deploymentconfigs
@@ -425,7 +439,7 @@ objects:
               while IFS=: read -u 3 -r resource rest; do
                 if [[ "${resource,,}" =~ deployment/vsystem-app|statefulset && "${serverVersion}" =~ ^3\. ]]; then
                   resource="${resource%%/*}"
-                  printf 'No need to patch vsystem pods on OpenShift %s, skipping %s/%s...\n' "${serverVersion}" "${resource,,}" "$name" >&2
+                  log 'No need to patch vsystem pods on OpenShift %s, skipping %s/%s...' "${serverVersion}" "${resource,,}" "$name"
                   continue
                 fi
                 case "${resource,,}" in
@@ -444,11 +458,11 @@ objects:
                       done
                     fi
                     if [[ "$allPatched" == 1 ]]; then
-                      printf 'Not patching deployment/%s because all the affected' >&2 "$name"
-                      printf ' nodes already run patched containers ...\n' >&2
+                      log -n 'Not patching deployment/%s because all the affected' "$name"
+                      log ' nodes already run patched containers ...'
                       continue
                     fi
-                    printf 'Patching container #%d in deployment/%s to make its pods privileged ...\n' \
+                    log 'Patching container #%d in deployment/%s to make its pods privileged ...' \
                         "$index" "$name" >&2
                     runOrLog oc patch "deploy/$name" --type json -p '[{
                       "op": "add",
@@ -456,7 +470,7 @@ objects:
                       "value": true
                     }]'
                   else
-                    printf 'Container #%d in deployment/%s already patched, skipping ...\n' "$index" "$name" >&2
+                    log 'Container #%d in deployment/%s already patched, skipping ...' "$index" "$name"
                     if [[ "$ready" == "ready" ]]; then
                       getPatchedNodeKeyValuesForDeployment "$name" "^Running$" | updatePatchedNodes
                     fi
@@ -484,34 +498,34 @@ objects:
                       done
                       # turn the argument array into a json list of strings
                       newarglist="[$(join , "${newargs[@]}")]"
-                      printf 'Patching deployment/%s to treat %s registry as insecure ...\n' "$name" "$registry" >&2
+                      log 'Patching deployment/%s to treat %s registry as insecure ...' "$name" "$registry"
                       patches+=( '{"op":"add","path":"/spec/template/spec/containers/0/args","value":'"$newarglist"'}' )
                     else
-                      printf 'deployment/%s already patched to treat %s registry as insecure, not patching ...\n' "$name" "$registry" >&2
+                      log 'deployment/%s already patched to treat %s registry as insecure, not patching ...' "$name" "$registry"
                     fi
                   fi
 
                   if [[ -n "${volName:-}" ]]; then
                     if [[ "${pkgmajor:-0}" == 2 && "${pkgminor:-0}" -ge 5 ]]; then
                       if [[ "${seType:-}" != "spc_t" ]]; then
-                        printf 'Patching deployment/%s to run as spc_t SELinux type ...\n' "$name" >&2
+                        log 'Patching deployment/%s to run as spc_t SELinux type ...' "$name"
                         patches+=( "$(join , \
                                     '{"op":"add"' \
                                      '"path":"/spec/template/spec/securityContext"' \
                                      '"value":{"seLinuxOptions":{"type":"spc_t"}}}' )" )
                       else
-                        printf 'deployment/%s already patched to run as spc_t type, not patching ...\n' "$name" >&2
+                        log 'deployment/%s already patched to run as spc_t type, not patching ...' "$name"
                       fi
                     else
                       # SDH 2.4 fails to run as spc_t on top of NFS - therefor privileged
                       if [[ "${unprivileged:-true}" != "false" ]]; then
-                        printf 'Patching deployment/%s to run as privileged ...\n' "$name" >&2
+                        log 'Patching deployment/%s to run as privileged ...' "$name"
                         patches+=( "$(join , \
                                     '{"op": "add"' \
                                      '"path": "/spec/template/spec/containers/0/securityContext"' \
                                      '"value": {"privileged": true}}' )" )
                       else
-                        printf 'deployment/%s already patched to run as privileged type, not patching ...\n' "$name" >&2
+                        log 'deployment/%s already patched to run as privileged type, not patching ...' "$name"
                       fi
                     fi
                   fi
@@ -524,7 +538,7 @@ objects:
                   IFS=: read -r index cname unprivileged <<<"${rest:-}"
                   name="diagnostics-fluentd"
                   if [[ "$unprivileged" == "true" ]]; then
-                    printf 'Patching container #%d in daemonset/%s to make its pods privileged ...\n' \
+                    log 'Patching container #%d in daemonset/%s to make its pods privileged ...' \
                         "$index" "$name" >&2
                     runOrLog oc patch "daemonset/$name" -p '{"spec": {"template": {"spec": {
                         "containers": [{
@@ -532,16 +546,16 @@ objects:
                             "securityContext": {"privileged": true}
                         }]}}}}'
                   else
-                    printf 'Container #%d in daemonset/%s already patched, skipping ...\n' "$index" "$name" >&2
+                    log 'Container #%d in daemonset/%s already patched, skipping ...' "$index" "$name"
                   fi
                   ;;
 
                 statefulset)
                   IFS=: read -r index ready <<<"${rest:-}"
                   if [[ -n "${index:-}" && -n "${ready:-}" ]]; then
-                    printf 'statefulset/vsystem-vrep already patched, skipping ...\n' >&2
+                    log 'statefulset/vsystem-vrep already patched, skipping ...'
                   else
-                    printf 'Adding emptyDir volume to statefulset/vsystem-vrep ...\n' >&2
+                    log 'Adding emptyDir volume to statefulset/vsystem-vrep ...'
                     runOrLog oc patch "statefulset/vsystem-vrep" --type json -p '[{
                       "op": "add",
                       "path": "/spec/template/spec/containers/'"$index"'/volumeMounts/0",
