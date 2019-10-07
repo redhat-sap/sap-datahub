@@ -198,6 +198,8 @@ objects:
             value: ${REGISTRY}
           - name: MARK_REGISTRY_INSECURE
             value: ${MARK_REGISTRY_INSECURE}
+          - name: MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED
+            value: ${MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED}
           image: "${BASE_IMAGE}:${BASE_IMAGE_TAG}"
           name: sdh-observer
           command:
@@ -233,7 +235,7 @@ objects:
             fi
 
             function log() {
-              date -R | tr -d '\n' >&2
+              date -R | tr '\n' ' ' >&2
               # no new line
               if [[ "$1" == -n ]]; then
                 shift
@@ -274,41 +276,6 @@ objects:
                 if [[ "$(jobs -r | wc -l)" -lt 3 ]]; then
                   terminate
                 fi
-              done
-            }
-
-            function getPatchedNodeKeyValueForPod() {
-              local podName="$1"
-              local nodeName="$(oc get -o jsonpath=$'{.spec.nodeName}\n' "pod/${podName}")"
-              oc get -o jsonpath="$nodeName:"$'{.status.nodeInfo.bootID}\n' "node/$nodeName"
-            }
-
-            function getPatchedNodeKeyValuesForDeployment() {
-              local deploymentName="$1"
-              local matchPhase="${2:-}"
-              local uuid="$(oc get -o go-template=$'{{index .metadata.labels "vsystem.datahub.sap.com/uuid"}}\n' "deploy/${deploymentName}")"
-              local name
-              while IFS=: read -r name phase;
-              do
-                [[ "$phase" =~ $matchPhase ]] || continue
-                getPatchedNodeKeyValueForPod "$name"
-              done < <(oc get pods -l "vsystem.datahub.sap.com/uuid=$uuid" \
-                          -o go-template=$'{{range .items}}{{.metadata.name}}:{{.status.phase}}\n{{end}}')
-            }
-
-            function updatePatchedNodes() {
-              local line
-              local nodeName
-              local cleanup="$( [[ ! -e /tmp/patched-nodes ]] && echo $? || echo $?; )"
-              while read -r line; do
-                if grep -q -F "^$line\$" /tmp/patched-nodes; then
-                  continue
-                fi
-                if [[ "$cleanup" == 1 ]]; then
-                  nodeName="${line%%:*}"
-                  sed -i "/^$nodeName/d" /tmp/patched-nodes
-                fi
-                printf '%s\n' "$line" >> /tmp/patched-nodes
               done
             }
 
@@ -444,24 +411,11 @@ objects:
                 fi
                 case "${resource,,}" in
                 deployment/vsystem-app)
+                  if ! evalBool "MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED"; then
+                    continue
+                  fi
                   IFS=: read -r ready index unprivileged <<<"${rest:-}"
                   if [[ "$unprivileged" == "true" ]]; then
-                    allPatched=1
-                    if [[ ! -e /tmp/patched-nodes ]]; then
-                      allPatched=0
-                    else
-                      for kv in `getPatchedNodeKeyValuesForDeployment "$name" "Pending|Running"`; do
-                        if ! grep -q -F "$kv" /tmp/patched-nodes 2>/dev/null; then
-                          allPatched=0
-                          break
-                        fi
-                      done
-                    fi
-                    if [[ "$allPatched" == 1 ]]; then
-                      log -n 'Not patching deployment/%s because all the affected' "$name"
-                      log ' nodes already run patched containers ...'
-                      continue
-                    fi
                     log 'Patching container #%d in deployment/%s to make its pods privileged ...' \
                         "$index" "$name" >&2
                     runOrLog oc patch "deploy/$name" --type json -p '[{
@@ -471,9 +425,6 @@ objects:
                     }]'
                   else
                     log 'Container #%d in deployment/%s already patched, skipping ...' "$index" "$name"
-                    if [[ "$ready" == "ready" ]]; then
-                      getPatchedNodeKeyValuesForDeployment "$name" "^Running$" | updatePatchedNodes
-                    fi
                   fi
                   ;;
 
@@ -614,6 +565,13 @@ parameters:
     description: >
       Set to true if the given or configured VFLOW_REGISTRY shall be marked as insecure
       in all instances of Pipeline Modeler.
+    required: true
+    value: "false"
+  - name: MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED
+    description: >
+      Patch deployments with vsystem-iptables container to make them privileged
+      in order to load kernel modules they need. Unless true, it is assumed
+      that the modules have been pre-loaded on the worker nodes.
     required: true
     value: "false"
   - name: REGISTRY
