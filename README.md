@@ -9,9 +9,10 @@ Currently contains the following OpenShift templates:
 SAP Data Hub deployment resources require certain modifications in order to run on OpenShift. Those are at least the following:
 
 - `statefulset/vsystem-vrep` must mount `emptyDir` volume on `/exports` directory on RHCOS nodes
-- `vsystem-iptables` containers must run as *privileged* on RHCOS nodes
 - `deployment/vflow-*` must be run as `spc_t` if it mounts `/var/run/docker.sock` socket from the host
 - `deployment/vflow-*` must be run with insecure registry parameter if the vflow registry is insecure
+- `vsystem-iptables` containers must run as *privileged* on RHCOS nodes unless all the required kernel modules are pre-loaded
+- `diagnostics-fluentd` pods need access to `/var/log` directories on nodes
 
 Once the template is deployed, the `vflow-observer` pod will modify all the mentioned SDH resources running in `SDH_NAMESPACE` that require modification. That will terminate existing instances (pods) and spawn new ones. 
 
@@ -22,14 +23,6 @@ Once the template is deployed, the `vflow-observer` pod will modify all the ment
 `vsystem-vrep` `statefulset` will be patched to mount `emptyDir` volume at `/exports` directory in order to enable NFS exports in the container running on top overlayfs which is the default filesystem in Red Hat Enterprise Linux CoreOS (RHCOS).
 
 This is applicable only to OpenShift cluster 4.1 and newer. The resource running on earlier releases will not be modified.
-
-#### `vystem-iptables` containers running as *privileged*
-
-On Red Hat Enterprise Linux CoreOS, container needs to be run as *privileged* in order to manage iptables on the host system. SAP Data Hub containers named `vsystem-iptables` deployed as part of every `vsystem-app` deployment attempt to modify iptables rules without having the necessary permissions. This `sdh-observer` fixes the permissions on-the-fly as the deployments are created.
-
-The template spawns a pod that observes the particular namespace where SAP Data Hub runs and marks each `"vsystem-iptables"` container in all `"vsystem-app"` deployments as *privileged*.
-
-This is applicable only to OpenShift cluster 4.1 and newer. The resources running on earlier releases will not be modified.
 
 #### Running SDH Pipeline Modeler as a Super Privileged Container
 
@@ -55,6 +48,23 @@ Important environment variables:
 
 - `MARK_REGISTRY_INSECURE` - must be set to `true` if the registry shall be marked as insecure. The default is `false`.
 - `REGISTRY` - can be specified to mark particular registry as insecure. The default is to determine the registry from the `installer-config` secret located in the `SDH_NAMESPACE`.
+
+#### `vsystem-iptables` containers running as *privileged*
+
+The `vsystem-iptables` containers need iptables and related kernel modules loaded on the nodes in order to manipulate firewall. On Red Hat Enterprise Linux CoreOS, nftables are used instead of iptables. Therefor, these modules are not loaded by default. Unless the modules are pre-loaded on the worker nodes using [MachineConfig API](https://github.com/openshift/machine-config-operator/tree/master-4.1#applying-configuration-changes-to-the-cluster), the `vsystem-app` deployments including these containers will fail to run, rendering the SAP Data Hub unusable.
+
+The `sdh-observer` allows to patch such deployments to make the `vsystem-iptables` containers `privileged`. This allows them to load all the kernel modules they need.
+
+The template spawns a pod that observes the particular namespace where SAP Data Hub runs and marks each `"vsystem-iptables"` container in all `"vsystem-app"` deployments as *privileged*. The pod will keep monitoring the namespace and patching the deployments as soon as they appear.
+
+This is applicable only to OpenShift cluster 4.1 and newer. The resources running on earlier releases will not be modified.
+
+In order to allow this functionality, the `sdh-observer` template needs to be run with parameter `MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED=true` like this:
+
+    oc process -f https://raw.githubusercontent.com/miminar/sdh-helpers/master/sdh-observer.yaml \
+        NAMESPACE=$SDH_NAMESPACE MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED=true | oc create -f -
+
+However, it is recommended to [pre-load the modules](https://access.redhat.com/articles/4324391#preload-kernel-modules-post) on the worker nodes instead.
 
 ### Usage
 
@@ -82,7 +92,8 @@ The error is harmless and can be ignored. The next deployment will succeed.
 
 - `NAMESPACE` - (**mandatory**) the project name, where the template shall be instantiated
 - `BASE_IMAGE_TAG` - (**mandatory**) must correspond to the OpenShift cluster's release (e.g. `v3.11` or `4.1`)
-- `MARK_REGISTRY_INSECURE` - shall be set to true if an insecure registry is used
+- `MARK_REGISTRY_INSECURE` - shall be set to `true` if an insecure registry is used
+- `MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED` - on OCP 4, when the needed [kernel modules were not preloaded](https://access.redhat.com/articles/4324391#preload-kernel-modules-post), this must be set to `true` to allow the `vsystem-iptables` containers to load the modules on their own
 
 ##### Determining BASE_IMAGE_TAG
 
