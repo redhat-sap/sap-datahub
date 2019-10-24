@@ -66,6 +66,17 @@ In order to allow this functionality, the `sdh-observer` template needs to be ru
 
 However, it is recommended to [pre-load the modules](https://access.redhat.com/articles/4324391#preload-kernel-modules-post) on the worker nodes instead.
 
+#### Fluentd pods cannot access or read logs on the nodes
+
+Fluentd pods needs to be run as *privileged* in order to access logs files on the nodes. The `sdh-observe` applies the needed changes as soon as possible.
+
+Additionally, on OCP 4, the default log file format is *plain text* while SDH fluentd pods expect `json` file format. Therefor without additional modification of fluentd's configuration file, the pods cannot parse the logs. The `sdh-observer` modifies the configuration  as well.
+
+If the plain text format is used on OpenShift 3, one can instruct `sdh-observer` to apply the changes there as well:
+
+    oc process -f https://raw.githubusercontent.com/miminar/sdh-helpers/master/sdh-observer.yaml \
+        NAMESPACE=$SDH_NAMESPACE NODE_LOG_FORMAT=json | oc create -f -
+
 ### Usage
 
 The template must be instantiated before the SAP Data Hub's installation. Both the target namespace and the namespace where the SAP Data Hub will be installed must exist before the instantiation. 
