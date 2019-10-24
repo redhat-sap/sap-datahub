@@ -19,7 +19,8 @@ metadata:
       Super Privileged Containers in order to access Docker sockets on nodes.
 
       Additionally, it patches diagnostics-fluentd daemonset to allow its pods
-      to access log files on the host system.
+      to access log files on the host system. On OCP 4, it also modifies it to
+      parse plain text log files instead of preconfigured json.
 
       On Red Hat Enterprise Linux CoreOS, "vsystem-iptables" containers need to
       be run as privileged in order to load iptables-related kernel modules.
@@ -77,7 +78,6 @@ objects:
     - apps
     - extensions
     resources:
-    - daemonsets
     - deployments
     - deployments/scale
     - statefulsets
@@ -86,6 +86,17 @@ objects:
     - get
     - list
     - patch
+    - watch
+  - apiGroups:
+    - apps
+    - extensions
+    resources:
+    - daemonsets
+    verbs:
+    - get
+    - list
+    - patch
+    - update
     - watch
   - apiGroups:
     - ""
@@ -97,8 +108,18 @@ objects:
   - apiGroups:
     - ""
     resources:
+    - configmaps
+    verbs:
+    - get
+    - list
+    - watch
+    - patch
+  - apiGroups:
+    - ""
+    resources:
     - pods
     verbs:
+    - delete
     - get
     - list
   # mandatory permissions if running in a different namespace
@@ -206,6 +227,8 @@ objects:
             value: ${MARK_REGISTRY_INSECURE}
           - name: MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED
             value: ${MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED}
+          - name: NODE_LOG_FORMAT
+            value: ${NODE_LOG_FORMAT}
           image: "${BASE_IMAGE}:${BASE_IMAGE_TAG}"
           name: sdh-observer
           command:
@@ -238,6 +261,19 @@ objects:
               printf 'WARNING: Client version != Server version (%s != %s).\n' "$clientVersion" "$serverVersion" >&2
               printf '         Please reinstantiate this template with the correct BASE_IMAGE_TAG parameter (e.g. v%s)."\n' >&2 \
                 "$serverVersion"
+            fi
+
+            if [[ ! "${NODE_LOG_FORMAT:-}" =~ ^(text|json|)$ ]]; then
+              printf 'WARNING: unrecognized NODE_LOG_FORMAT; "%s" is not one of "json" or "text"!' \
+                "$NODE_LOG_FORMAT"
+              exit 1
+            fi
+            if [[ -z "${NODE_LOG_FORMAT:-}" ]]; then
+              if [[ "${serverVersion}" =~ ^3 ]]; then
+                NODE_LOG_FORMAT=json
+              else
+                NODE_LOG_FORMAT=text
+              fi
             fi
 
             function log() {
@@ -274,6 +310,7 @@ objects:
             }
 
             function observe() {
+              oc observe --listen-addr=:11254 configmap   &
               oc observe --listen-addr=:11253 daemonset   &
               oc observe --listen-addr=:11252 statefulset &
               oc observe --listen-addr=:11251 deploy      &
@@ -354,13 +391,30 @@ objects:
                 '{{else if eq .kind "DaemonSet"}}'
                   '{{if eq .metadata.name "diagnostics-fluentd"}}'
                     # print (string kind):(int containerIndex):(string containerName):(bool unprivileged)
+                    #      :(int volumeindex):(string varlibdockercontainers volumehostpath)
+                    #      :(int volumeMount index):(string varlibdockercontainers volumeMount path)
                     '{{.kind}}'
                     '{{range $i, $c := $d.spec.template.spec.containers}}'
                       '{{if eq $c.name "diagnostics-fluentd"}}'
-                       $':{{$i}}:{{$c.name}}:{{not $c.securityContext.privileged}}\n'
+                        ':{{$i}}:{{$c.name}}:{{not $c.securityContext.privileged}}'
+                        '{{range $j, $v := $d.spec.template.spec.volumes}}'
+                          '{{if eq $v.name "varlibdockercontainers"}}'
+                            ':{{$j}}:{{$v.hostPath.path}}'
+                          '{{end}}'
+                        '{{end}}'
+                        '{{range $j, $vm := $c.volumeMounts}}'
+                          '{{if eq $vm.name "varlibdockercontainers"}}'
+                            ':{{$j}}:{{$vm.mountPath}}'
+                          '{{end}}'
+                        '{{end}}'
                       '{{end}}'
                     '{{end}}'
                    $'\n'
+                  '{{end}}'
+                '{{else if eq .kind "ConfigMap"}}'
+                  '{{if eq .metadata.name "diagnostics-fluentd-settings"}}'
+                    # print (string kind)/(string name)
+                    $'{{.kind}}/{{.metadata.name}}\n'
                   '{{end}}'
                 '{{else}}'
                   # vsystem-vrep statefulset
@@ -383,9 +437,10 @@ objects:
               '{{end}}'
             )
             lackingPermissions=0
-            for perm in get/nodes get/projects get/pods get/secrets \
-                      watch/deployments get/deployments watch/statefulsets get/statefulsets \
-                      patch/deployments patch/statefulsets patch/daemonsets;
+            for perm in get/nodes get/projects get/pods get/secrets get/configmaps \
+                      watch/deployments get/deployments watch/statefulsets get/statefulsets watch/configmaps \
+                      patch/deployments patch/statefulsets patch/daemonsets patch/configmaps \
+                      update/daemonsets delete/pods;
             do
               if ! oc auth can-i "${perm%%/*}" "${perm##*/}" >/dev/null; then
                 log -n 'Cannot "%s" "%s", please grant the needed permissions' "${perm%%/*}" "${perm##*/}"
@@ -477,10 +532,9 @@ objects:
                       # SDH 2.4 fails to run as spc_t on top of NFS - therefor privileged
                       if [[ "${unprivileged:-true}" != "false" ]]; then
                         log 'Patching deployment/%s to run as privileged ...' "$name"
-                        patches+=( "$(join , \
-                                    '{"op": "add"' \
-                                     '"path": "/spec/template/spec/containers/0/securityContext"' \
-                                     '"value": {"privileged": true}}' )" )
+                        patches+=( '{"op": "add"' \
+                                    '"path": "/spec/template/spec/containers/0/securityContext"' \
+                                    '"value": {"privileged": true}}' )
                       else
                         log 'deployment/%s already patched to run as privileged type, not patching ...' "$name"
                       fi
@@ -491,20 +545,99 @@ objects:
                   runOrLog oc patch --type json -p "[$(join , "${patches[@]}")]" deploy "$name"
                   ;;
 
+                configmap/diagnostics-fluentd-settings)
+                  contents="$(oc get "${resource,,}" -o go-template='{{index .data "fluent.conf"}}')"
+                  if [[ -z "${contents:-}" ]]; then
+                    log "Failed to get contents of fluent.conf configuration file!"
+                    continue
+                  fi
+                  currentLogParseType="$(sed -n '/<parse>/,/<\/parse>/s,^\s\+@type\s*\([^[:space:]]\+\).*,\1,p' <<<"${contents}")"
+                  if [[ -z "${currentLogParseType:-}" ]]; then
+                    log "Failed to determine the current log type parsing of fluentd pods!"
+                    continue
+                  fi
+                  case "${currentLogParseType}" in
+                  "multi_format") continue; ;; # shall support both json and text 
+                  "json")
+                    if [[ "$NODE_LOG_FORMAT" == json ]]; then
+                      log "Fluentd pods are already configured to parse json, not patching..."
+                      continue
+                    fi
+                    ;;
+                  "regexp")
+                    if [[ "$NODE_LOG_FORMAT" == text ]]; then
+                      log "Fluentd pods are already configured to parse text, not patching..."
+                      continue
+                    fi
+                    ;;
+                  esac
+                  exprs=(
+                    -e '/^\s\+expression\s\+\/\^.*logtag/d'
+                  )
+                  if [[ "$NODE_LOG_FORMAT" == text ]]; then
+                    exprs+=(
+                          -e '/<parse>/,/<\/parse>/s,@type.*,@type regexp,'
+                          -e '/<parse>/,/<\/parse>/s,\(\s*\)@type.*,\0\n\1expression /^(?<time>.+) (?<stream>stdout|stderr)( (?<logtag>.))? (?<log>.*)$/,'
+                          -e "/<parse>/,/<\/parse>/s,time_format.*,time_format '%Y-%m-%dT%H:%M:%S.%N%:z',"
+                    )
+                  else
+                    exprs+=(
+                      -e '/<parse>/,/<\/parse>/s,@type.*,@type json,'
+                      -e "/<parse>/,/<\/parse>/s,time_format.*,time_format '%Y-%m-%dT%H:%M:%S.%NZ',"
+                    )
+                  fi
+                  newContents="$(printf '%s\n' "${contents}" | sed "${exprs[@]}")"
+                  log 'Patching configmap %s to support %s logging format on OCP 4...' "$name" "$NODE_LOG_FORMAT"
+                  yamlPatch="$(printf '%s\n' "data:" "  fluent.conf: |" "$(sed 's/^/    /' <<<"${newContents}")")"
+                  runOrLog oc patch "${resource,,}" -p "$yamlPatch"
+                  readarray -t pods <<<"$(oc get pods -l datahub.sap.com/app-component=fluentd -o name)"
+                  [[ "${#pods[@]}" == 0 ]] && continue
+                  log 'Restarting fluentd pods ...'
+                  runOrLog oc delete --force --grace-period=0 "${pods[@]}"
+                  ;;
+
                 daemonset)
-                  IFS=: read -r index cname unprivileged <<<"${rest:-}"
+                  IFS=: read -r index cname unprivileged volumeIndex hostPath volumeMountIndex mountPath <<<"${rest:-}"
                   name="diagnostics-fluentd"
+                  patches=()
+                  patchTypes=()
                   if [[ "$unprivileged" == "true" ]]; then
                     log 'Patching container #%d in daemonset/%s to make its pods privileged ...' \
-                        "$index" "$name" >&2
-                    runOrLog oc patch "daemonset/$name" -p '{"spec": {"template": {"spec": {
-                        "containers": [{
-                            "name": "'"$cname"'",
-                            "securityContext": {"privileged": true}
-                        }]}}}}'
+                        "$index" "$name"
+                        patches+=( "$(join ' ' '{"spec":{"template":{"spec":{"containers":' \
+                                      '[{"name":"diagnostics-fluentd", "securityContext":{"privileged": true}}]}}}}')"
+                        )
+                        patchTypes+=( strategic )
                   else
                     log 'Container #%d in daemonset/%s already patched, skipping ...' "$index" "$name"
                   fi
+                  if [[ -n "${hostPath:-}" && "${hostPath}" != "/var/lib/docker" ]]; then
+                    log 'Patching container #%d in daemonset/%s to mount /var/lib/docker instead of %s' \
+                        "$index" "$name" "$hostPath"
+                    patches+=( "$(join ' ' '[{"op": "replace", "path":' \
+                              '"/spec/template/spec/containers/'"$index/volumeMounts/$volumeMountIndex"'",' \
+                          '"value": {"name":"varlibdockercontainers","mountPath":"/var/lib/docker","readOnly": true}}]' )"
+                    )
+                    patchTypes+=( json )
+                    patches+=( "$(join ' ' '{"spec":{"template":{"spec":' \
+                            '{"volumes":[{"name": "varlibdockercontainers", "hostPath":' \
+                              '{"path": "/var/lib/docker", "type":""}}]}}}}' )"
+                    )
+                    patchTypes+=( strategic )
+                  elif [[ -z "${hostPath:-}" ]]; then
+                    log 'Failed to determine hostPath for varlibcontainers volume!'
+                  else
+                    log 'Daemonset/%s already patched to mount /var/lib/docker, skipping ...' "$name"
+                  fi
+
+                  [[ "${#patches[@]}" == 0 ]] && continue
+                  dsSpec="$(oc get -o json daemonset/"$name")"
+                  for ((i=0; i < "${#patches[@]}"; i++)); do
+                    patch="${patches[$i]}"
+                    patchType="${patchTypes[$i]}"
+                    dsSpec="$(oc patch -o json --local -f - --type "$patchType" -p "${patch}" <<<"${dsSpec}")"
+                  done
+                  oc replace -f - <<<"${dsSpec}"
                   ;;
 
                 statefulset)
@@ -526,7 +659,7 @@ objects:
                   ;;
                 esac
               done 3< <(oc get deploy/"$name" statefulset/"$name" daemonset/"$name" \
-                           -o go-template="${gotmpl}" 2>/dev/null ||: )
+                    configmap/"$name" -o go-template="${gotmpl}" 2>/dev/null ||: )
             done 4< <(observe)
         restartPolicy: Always
         serviceAccount: sdh-observer
@@ -580,6 +713,12 @@ parameters:
       that the modules have been pre-loaded on the worker nodes.
     required: true
     value: "false"
+  - name: NODE_LOG_FORMAT
+    description: >
+      Format of the logging files on the nodes. Allowed values are "json" and "text".
+      If not given, the default is "json" for OpenShift 3 cluster and "text" for OpenShift 4.
+      By default, the SDH fluentd pods are configured to parse "json".
+    required: false
   - name: REGISTRY
     description: >
       The registry to mark as insecure. If not given, it will be determined from
