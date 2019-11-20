@@ -61,7 +61,7 @@ This is applicable only to OpenShift cluster 4.1 and newer. The resources runnin
 
 In order to allow this functionality, the `sdh-observer` template needs to be run with parameter `MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED=true` like this:
 
-    oc process -f https://raw.githubusercontent.com/miminar/sdh-helpers/master/sdh-observer.yaml \
+    oc process -f https://raw.githubusercontent.com/redhat-cop/sap-datahub/master/sdh-observer.yaml \
         NAMESPACE=$SDH_NAMESPACE MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED=true | oc create -f -
 
 However, it is recommended to [pre-load the modules](https://access.redhat.com/articles/4324391#preload-kernel-modules-post) on the worker nodes instead.
@@ -74,7 +74,7 @@ Additionally, on OCP 4, the default log file format is *plain text* while SDH fl
 
 If the plain text format is used on OpenShift 3, one can instruct `sdh-observer` to apply the changes there as well:
 
-    oc process -f https://raw.githubusercontent.com/miminar/sdh-helpers/master/sdh-observer.yaml \
+    oc process -f https://raw.githubusercontent.com/redhat-cop/sap-datahub/master/sdh-observer.yaml \
         NAMESPACE=$SDH_NAMESPACE NODE_LOG_FORMAT=json | oc create -f -
 
 ### Usage
@@ -136,7 +136,7 @@ For example, command will return `v3.11` for OCP 3.11 server release and `4.1` f
 If running the observer in the same namespace/project as Data Hub, instantiate the template as is in the desired namespace:
 
     oc project $SDH_NAMESPACE
-    oc process -f https://raw.githubusercontent.com/miminar/sdh-helpers/master/sdh-observer.yaml \
+    oc process -f https://raw.githubusercontent.com/redhat-cop/sap-datahub/master/sdh-observer.yaml \
         NAMESPACE=$SDH_NAMESPACE MARK_REGISTRY_INSECURE=true | oc create -f -
 
 #### Deploying in a different project
@@ -147,5 +147,5 @@ If running in a different/new namespace/project, instantiate the template with p
     NAMESPACE=sapdatahub-admin          # where the contents of this template will be instantiated
     oc new-project $SDH_NAMESPACE
     oc new-project $NAMESPACE
-    oc process -f https://raw.githubusercontent.com/miminar/sdh-helpers/master/sdh-observer.yaml \
+    oc process -f https://raw.githubusercontent.com/redhat-cop/sap-datahub/master/sdh-observer.yaml \
         SDH_NAMESPACE=$SDH_NAMESPACE NAMESPACE=$NAMESPACE MARK_REGISTRY_INSECURE=true | oc create -f -
