@@ -461,18 +461,22 @@ objects:
 
             gotmpl="$(printf '%s' "${gotmplarr[@]}")"
             gotmplvflow=$'{{range $index, $arg := (index (index .spec.template.spec.containers 0) "args")}}{{$arg}}\n{{end}}'
+            mkiptabsprivileged=0
+            if ! evalBool "MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED"; then
+              mkiptabsprivileged=1
+            fi
 
             while IFS=' ' read -u 4 -r _ _ _ _ _ name; do
               [[ -z "${name:-}" ]] && continue
               while IFS=: read -u 3 -r resource rest; do
-                if [[ "${resource,,}" =~ deployment/vsystem-app|statefulset && "${serverVersion}" =~ ^3\. ]]; then
+                if [[ "${serverVersion}" =~ ^3\. && "$mkiptabsprivileged/${resource,,}" =~ 0/deployment/vsystem-app|statefulset ]]; then
                   resource="${resource%%/*}"
                   log 'No need to patch vsystem pods on OpenShift %s, skipping %s/%s...' "${serverVersion}" "${resource,,}" "$name"
                   continue
                 fi
                 case "${resource,,}" in
                 deployment/vsystem-app)
-                  if ! evalBool "MAKE_VSYSTEM_IPTABLES_PODS_PRIVILEGED"; then
+                  if [[ "${mkiptabsprivileged}" == 0 ]]; then
                     continue
                   fi
                   IFS=: read -r ready index unprivileged <<<"${rest:-}"
