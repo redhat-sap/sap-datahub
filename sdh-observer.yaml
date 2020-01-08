@@ -469,7 +469,7 @@ objects:
             while IFS=' ' read -u 4 -r _ _ _ _ _ name; do
               [[ -z "${name:-}" ]] && continue
               while IFS=: read -u 3 -r resource rest; do
-                if [[ "${serverVersion}" =~ ^3\. && "$mkiptabsprivileged/${resource,,}" =~ 0/deployment/vsystem-app|statefulset ]]; then
+                if [[ "${serverVersion}" =~ ^3\. && "$mkiptabsprivileged/${resource,,}" =~ ^0/(deployment/vsystem-app|statefulset) ]]; then
                   resource="${resource%%/*}"
                   log 'No need to patch vsystem pods on OpenShift %s, skipping %s/%s...' "${serverVersion}" "${resource,,}" "$name"
                   continue
@@ -715,6 +715,7 @@ parameters:
       Patch deployments with vsystem-iptables container to make them privileged
       in order to load kernel modules they need. Unless true, it is assumed
       that the modules have been pre-loaded on the worker nodes.
+      This will make also vsystem-vrep-* pod privileged.
     required: true
     value: "false"
   - name: NODE_LOG_FORMAT
